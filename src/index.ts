@@ -10,17 +10,12 @@
 import { Env, ChatMessage } from "./types";
 
 // Model ID for Workers AI model
-// https://developers.cloudflare.com/workers-ai/models/
 const MODEL_ID = "@cf/meta/llama-4-scout-17b-16e-instruct";
 
 // Default system prompt
-const SYSTEM_PROMPT =
-	"你是一個友善的繁體中文助理，請用繁體中文回答所有問題，提供準確且簡潔的回應。";
+const SYSTEM_PROMPT = "你是一個友善的繁體中文助理，請用繁體中文回答所有問題，提供準確且簡潔的回應。";
 
 export default {
-	/**
-	 * Main request handler for the Worker
-	 */
 	async fetch(
 		request: Request,
 		env: Env,
@@ -28,58 +23,54 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Handle static assets (frontend)
 		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
 			return env.ASSETS.fetch(request);
 		}
 
-		// API Routes
 		if (url.pathname === "/api/chat") {
-			// Handle POST requests for chat
 			if (request.method === "POST") {
 				return handleChatRequest(request, env);
 			}
-
-			// Method not allowed for other request types
 			return new Response("Method not allowed", { status: 405 });
 		}
 
-		// Handle 404 for unmatched routes
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
 
-/**
- * Handles chat API requests
- */
 async function handleChatRequest(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
 	try {
-		// Parse JSON request body
 		const { messages = [] } = (await request.json()) as {
 			messages: ChatMessage[];
 		};
 
-		// Add system prompt if not present
-		if (!messages.some((msg) => msg.role === "system")) {
-			messages.unshift({ role: "system", content: SYSTEM_PROMPT });
-		}
+		// 過濾掉錯誤訊息，只保留正常的 user / assistant 對話
+		const cleanMessages = messages.filter(
+			(msg) => msg.role === "user" || msg.role === "assistant"
+		);
+
+		// 只保留最近 10 則，避免累積錯誤對話
+		const recentMessages = cleanMessages.slice(-10);
+
+		// 加入 system prompt
+		recentMessages.unshift({ role: "system", content: SYSTEM_PROMPT });
 
 		const stream = await env.AI.run(
 			MODEL_ID,
 			{
-				messages,
+				messages: recentMessages,
 				max_tokens: 1024,
 				stream: true,
 			},
 			{
-				// Uncomment to use AI Gateway
+				// AI Gateway（建立後取消註解並填入 ID）
 				 gateway: {
-				   id: "david-gateway", // Replace with your AI Gateway ID
-				   skipCache: false,      // Set to true to bypass cache
-				   cacheTtl: 3600,        // Cache time-to-live in seconds
+				   id: "david-gateway",
+				   skipCache: false,
+				   cacheTtl: 3600,
 				 },
 			},
 		);
