@@ -76,11 +76,11 @@ async function handleChatRequest(
 			},
 			{
 				// Uncomment to use AI Gateway
-				// gateway: {
-				//   id: "YOUR_GATEWAY_ID", // Replace with your AI Gateway ID
-				//   skipCache: false,      // Set to true to bypass cache
-				//   cacheTtl: 3600,        // Cache time-to-live in seconds
-				// },
+				 gateway: {
+				   id: "david-gateway", // Replace with your AI Gateway ID
+				   skipCache: false,      // Set to true to bypass cache
+				   cacheTtl: 3600,        // Cache time-to-live in seconds
+				 },
 			},
 		);
 
