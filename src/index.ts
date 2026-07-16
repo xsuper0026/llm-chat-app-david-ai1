@@ -1,95 +1,126 @@
 /**
  * LLM Chat Application Template
  *
- * A simple chat application using Cloudflare Workers AI.
- * This template demonstrates how to implement an LLM-powered chat interface with
- * streaming responses using Server-Sent Events (SSE).
+ * A simple chat application using Cloudflare Workers AI + AI Gateway.
  *
  * @license MIT
  */
-import { Env, ChatMessage } from "./types";
 
-// Model ID for Workers AI model
-const MODEL_ID = "@cf/meta/llama-4-scout-17b-16e-instruct";
+// 模型與系統提示
+const MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const SYSTEM_PROMPT =
+  "You are a helpful, friendly assistant. Provide concise and accurate responses.";
 
-// Default system prompt
-const SYSTEM_PROMPT = "你是一個友善的繁體中文助理，請用繁體中文回答所有問題，提供準確且簡潔的回應。";
+// Env 型別定義（讓 TypeScript 認得 bindings）
+export interface Env {
+  AI: Ai;
+  ASSETS: Fetcher;
+}
+
+// 訊息型別
+interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+interface ChatRequestBody {
+  messages?: ChatMessage[];
+}
 
 export default {
-	async fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext,
-	): Promise<Response> {
-		const url = new URL(request.url);
+  /**
+   * Main request handler for the Worker
+   */
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<Response> {
+    const url = new URL(request.url);
 
-		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
-			return env.ASSETS.fetch(request);
-		}
+    // 靜態資源路由：交給 ASSETS binding 處理（前端 HTML/CSS/JS）
+    if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
+      // 防呆：如果 ASSETS binding 沒設定，回傳明確錯誤
+      if (!env.ASSETS) {
+        return new Response(
+          "ASSETS binding is not configured. Please check wrangler.jsonc.",
+          { status: 500 }
+        );
+      }
+      return env.ASSETS.fetch(request);
+    }
 
-		if (url.pathname === "/api/chat") {
-			if (request.method === "POST") {
-				return handleChatRequest(request, env);
-			}
-			return new Response("Method not allowed", { status: 405 });
-		}
+    // API 路由
+    if (url.pathname === "/api/chat") {
+      if (request.method === "POST") {
+        return handleChatRequest(request, env);
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
 
-		return new Response("Not found", { status: 404 });
-	},
+    return new Response("Not found", { status: 404 });
+  },
 } satisfies ExportedHandler<Env>;
 
+/**
+ * 處理聊天請求
+ */
 async function handleChatRequest(
-	request: Request,
-	env: Env,
+  request: Request,
+  env: Env
 ): Promise<Response> {
-	try {
-		const { messages = [] } = (await request.json()) as {
-			messages: ChatMessage[];
-		};
+  try {
+    // 防呆：檢查 AI binding 是否存在
+    if (!env.AI) {
+      return new Response(
+        JSON.stringify({
+          error: "AI binding is not configured. Please check wrangler.jsonc.",
+        }),
+        {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }
+      );
+    }
 
-		// 過濾掉錯誤訊息，只保留正常的 user / assistant 對話
-		const cleanMessages = messages.filter(
-			(msg) => msg.role === "user" || msg.role === "assistant"
-		);
+    const body = (await request.json()) as ChatRequestBody;
+    const messages: ChatMessage[] = body.messages ?? [];
 
-		// 只保留最近 10 則，避免累積錯誤對話
-		const recentMessages = cleanMessages.slice(-10);
+    // 若沒有 system prompt，補上預設的
+    if (!messages.some((msg) => msg.role === "system")) {
+      messages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    }
 
-		// 加入 system prompt
-		recentMessages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    // 呼叫 Workers AI（透過 AI Gateway）
+    const response = await env.AI.run(
+      MODEL_ID,
+      {
+        messages,
+        max_tokens: 1024,
+      },
+      {
+        returnRawResponse: true,
+        // AI Gateway 整合
+        gateway: {
+          id: "david-gateway", // ⚠️ 請確認你在 Dashboard 有建立此 Gateway
+          skipCache: false,
+          cacheTtl: 3600,
+        },
+      }
+    );
 
-		const stream = await env.AI.run(
-			MODEL_ID,
-			{
-				messages: recentMessages,
-				max_tokens: 1024,
-				stream: true,
-			},
-			{
-				// AI Gateway（建立後取消註解並填入 ID）
-				 gateway: {
-				   id: "david-gateway",
-				   skipCache: false,
-				   cacheTtl: 3600,
-				 },
-			},
-		);
-
-		return new Response(stream, {
-			headers: {
-				"content-type": "text/event-stream; charset=utf-8",
-				"cache-control": "no-cache",
-				connection: "keep-alive",
-			},
-		});
-	} catch (error) {
-		console.error("Error processing chat request:", error);
-		return new Response(
-			JSON.stringify({ error: "Failed to process request" }),
-			{
-				status: 500,
-				headers: { "content-type": "application/json" },
-			},
-		);
-	}
+    return response;
+  } catch (error) {
+    console.error("Error processing chat request:", error);
+    return new Response(
+      JSON.stringify({
+        error: "Failed to process request",
+        detail: error instanceof Error ? error.message : String(error),
+      }),
+      {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  }
 }
