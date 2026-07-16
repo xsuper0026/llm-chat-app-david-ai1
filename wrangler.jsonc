@@ -1,32 +1,22 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "llm-chat-app-david-ai1",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-07-15",
-  "compatibility_flags": ["nodejs_compat"],
-
-  /**
-   * 靜態資源綁定 - 這是修正錯誤的關鍵！
-   * env.ASSETS 就是靠這段設定產生的
-   */
-  "assets": {
-    "directory": "./public",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
-
-  /**
-   * Workers AI 綁定
-   */
-  "ai": {
-    "binding": "AI"
-  },
-
-  /**
-   * 觀測性（強烈建議開啟，可以在 Dashboard 看到 log）
-   */
-  "observability": {
-    "enabled": true,
-    "head_sampling_rate": 1
-  }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "llm-chat-app-david-ai1",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-10-08",
+	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	"assets": {
+		"binding": "ASSETS",
+		"directory": "./public"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"ai": {
+		"binding": "AI"
+	},
+	"upload_source_maps": true
 }
