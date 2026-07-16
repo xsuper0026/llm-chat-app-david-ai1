@@ -2,24 +2,20 @@
  * LLM Chat Application Template
  *
  * A simple chat application using Cloudflare Workers AI + AI Gateway.
- * This template demonstrates how to implement an LLM-powered chat interface with
- * streaming responses using Server-Sent Events (SSE).
+ * Streaming responses using Server-Sent Events (SSE).
  *
  * @license MIT
  */
 
-// 模型與系統提示
 const MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const SYSTEM_PROMPT =
   "You are a helpful, friendly assistant. Provide concise and accurate responses.";
 
-// Env 型別定義（讓 TypeScript 認得 bindings）
 export interface Env {
   AI: Ai;
   ASSETS: Fetcher;
 }
 
-// 訊息型別
 interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -30,9 +26,6 @@ interface ChatRequestBody {
 }
 
 export default {
-  /**
-   * Main request handler for the Worker
-   */
   async fetch(
     request: Request,
     env: Env,
@@ -40,7 +33,7 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
-    // 靜態資源路由：交給 ASSETS binding 處理（前端 HTML/CSS/JS）
+    // 靜態資源路由
     if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
       if (!env.ASSETS) {
         return new Response(
@@ -59,4 +52,64 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    return new
+    return new Response("Not found", { status: 404 });
+  },
+} satisfies ExportedHandler<Env>;
+
+async function handleChatRequest(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  try {
+    if (!env.AI) {
+      return new Response(
+        JSON.stringify({
+          error: "AI binding is not configured. Please check wrangler.jsonc.",
+        }),
+        {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }
+      );
+    }
+
+    const body = (await request.json()) as ChatRequestBody;
+    const messages: ChatMessage[] = body.messages ?? [];
+
+    if (!messages.some((msg) => msg.role === "system")) {
+      messages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    }
+
+    // ⭐ 呼叫 Workers AI + Streaming SSE
+    const response = await env.AI.run(
+      MODEL_ID,
+      {
+        messages,
+        max_tokens: 1024,
+        stream: true,           // ⭐ 啟用 SSE streaming
+      },
+      {
+        returnRawResponse: true,
+        gateway: {
+          id: "david-gateway",
+          skipCache: true,      // ⭐ 修正重點：跳過快取（否則會回傳舊的 JSON 格式）
+          cacheTtl: 3600,
+        },
+      }
+    );
+
+    return response;
+  } catch (error) {
+    console.error("Error processing chat request:", error);
+    return new Response(
+      JSON.stringify({
+        error: "Failed to process request",
+        detail: error instanceof Error ? error.message : String(error),
+      }),
+      {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  }
+}
