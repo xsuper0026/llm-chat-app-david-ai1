@@ -10,17 +10,18 @@ const userInput = document.getElementById("user-input");
 const sendButton = document.getElementById("send-button");
 const typingIndicator = document.getElementById("typing-indicator");
 
+// Initial welcome message
+const INITIAL_MESSAGE = {
+	role: "assistant",
+	content:
+		"Hello! I'm an LLM chat app powered by Cloudflare Workers AI. How can I help you today?",
+};
+
 // Chat state
-let chatHistory = [
-	{
-		role: "assistant",
-		content:
-			"Hello! I'm an LLM chat app powered by Cloudflare Workers AI. How can I help you today?",
-	},
-];
+let chatHistory = [{ ...INITIAL_MESSAGE }];
 let isProcessing = false;
 
-// Auto-resize textarea as user types
+// Auto-resize textarea
 userInput.addEventListener("input", function () {
 	this.style.height = "auto";
 	this.style.height = this.scrollHeight + "px";
@@ -37,13 +38,28 @@ userInput.addEventListener("keydown", function (e) {
 // Send button click handler
 sendButton.addEventListener("click", sendMessage);
 
+// ⭐ 新增：清除對話按鈕（如果 HTML 有 clear-button 元素）
+const clearButton = document.getElementById("clear-button");
+if (clearButton) {
+	clearButton.addEventListener("click", clearChat);
+}
+
+/**
+ * ⭐ 新增：清除對話（重置 chat history 與 UI）
+ */
+function clearChat() {
+	chatHistory = [{ ...INITIAL_MESSAGE }];
+	chatMessages.innerHTML = "";
+	addMessageToChat("assistant", INITIAL_MESSAGE.content);
+	userInput.focus();
+}
+
 /**
  * Sends a message to the chat API and processes the response
  */
 async function sendMessage() {
 	const message = userInput.value.trim();
 
-	// Don't send empty messages
 	if (message === "" || isProcessing) return;
 
 	// Disable input while processing
@@ -51,7 +67,7 @@ async function sendMessage() {
 	userInput.disabled = true;
 	sendButton.disabled = true;
 
-	// Add user message to chat
+	// Add user message to chat UI
 	addMessageToChat("user", message);
 
 	// Clear input
@@ -61,21 +77,20 @@ async function sendMessage() {
 	// Show typing indicator
 	typingIndicator.classList.add("visible");
 
-	// Add message to history
+	// ⭐ 記住原始 history 長度，方便失敗時 rollback
+	const historyLengthBeforeSend = chatHistory.length;
 	chatHistory.push({ role: "user", content: message });
 
+	// Create new assistant response element
+	const assistantMessageEl = document.createElement("div");
+	assistantMessageEl.className = "message assistant-message";
+	assistantMessageEl.innerHTML = "<p></p>";
+	chatMessages.appendChild(assistantMessageEl);
+	const assistantTextEl = assistantMessageEl.querySelector("p");
+
+	chatMessages.scrollTop = chatMessages.scrollHeight;
+
 	try {
-		// Create new assistant response element
-		const assistantMessageEl = document.createElement("div");
-		assistantMessageEl.className = "message assistant-message";
-		assistantMessageEl.innerHTML = "<p></p>";
-		chatMessages.appendChild(assistantMessageEl);
-		const assistantTextEl = assistantMessageEl.querySelector("p");
-
-		// Scroll to bottom
-		chatMessages.scrollTop = chatMessages.scrollHeight;
-
-		// Send request to API
 		const response = await fetch("/api/chat", {
 			method: "POST",
 			headers: {
@@ -86,9 +101,16 @@ async function sendMessage() {
 			}),
 		});
 
-		// Handle errors
 		if (!response.ok) {
-			throw new Error("Failed to get response");
+			// ⭐ 讀取後端錯誤內容，區分是 AI 拒絕還是伺服器錯誤
+			let errorDetail = "";
+			try {
+				const errorData = await response.json();
+				errorDetail = errorData.detail || errorData.error || "";
+			} catch {
+				errorDetail = `HTTP ${response.status}`;
+			}
+			throw new Error(errorDetail);
 		}
 		if (!response.body) {
 			throw new Error("Response body is null");
@@ -109,15 +131,11 @@ async function sendMessage() {
 			const { done, value } = await reader.read();
 
 			if (done) {
-				// Process any remaining complete events in buffer
 				const parsed = consumeSseEvents(buffer + "\n\n");
 				for (const data of parsed.events) {
-					if (data === "[DONE]") {
-						break;
-					}
+					if (data === "[DONE]") break;
 					try {
 						const jsonData = JSON.parse(data);
-						// Handle both Workers AI format (response) and OpenAI format (choices[0].delta.content)
 						let content = "";
 						if (
 							typeof jsonData.response === "string" &&
@@ -138,7 +156,6 @@ async function sendMessage() {
 				break;
 			}
 
-			// Decode chunk
 			buffer += decoder.decode(value, { stream: true });
 			const parsed = consumeSseEvents(buffer);
 			buffer = parsed.buffer;
@@ -150,7 +167,6 @@ async function sendMessage() {
 				}
 				try {
 					const jsonData = JSON.parse(data);
-					// Handle both Workers AI format (response) and OpenAI format (choices[0].delta.content)
 					let content = "";
 					if (
 						typeof jsonData.response === "string" &&
@@ -168,26 +184,30 @@ async function sendMessage() {
 					console.error("Error parsing SSE data as JSON:", e, data);
 				}
 			}
-			if (sawDone) {
-				break;
-			}
+			if (sawDone) break;
 		}
 
-		// Add completed response to chat history
+		// ⭐ 判斷 AI 是否真的有回應
 		if (responseText.length > 0) {
 			chatHistory.push({ role: "assistant", content: responseText });
+		} else {
+			// ⭐ 沒回應也算失敗（AI 拒絕但沒回錯誤），rollback 使用者訊息
+			chatHistory.length = historyLengthBeforeSend;
+			assistantTextEl.textContent =
+				"⚠️ AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。";
+			assistantMessageEl.style.color = "#c0392b";
 		}
 	} catch (error) {
 		console.error("Error:", error);
-		addMessageToChat(
-			"assistant",
-			"Sorry, there was an error processing your request.",
-		);
-	} finally {
-		// Hide typing indicator
-		typingIndicator.classList.remove("visible");
 
-		// Re-enable input
+		// ⭐ 關鍵修正：失敗時 rollback chatHistory，避免汙染後續對話
+		chatHistory.length = historyLengthBeforeSend;
+
+		// ⭐ 顯示更清楚的錯誤訊息
+		assistantTextEl.textContent = `⚠️ 抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。\n\n（錯誤詳情：${error.message || error}）`;
+		assistantMessageEl.style.color = "#c0392b";
+	} finally {
+		typingIndicator.classList.remove("visible");
 		isProcessing = false;
 		userInput.disabled = false;
 		sendButton.disabled = false;
@@ -196,15 +216,14 @@ async function sendMessage() {
 }
 
 /**
- * Helper function to add message to chat
+ * Helper function to add message to chat UI
  */
 function addMessageToChat(role, content) {
 	const messageEl = document.createElement("div");
 	messageEl.className = `message ${role}-message`;
-	messageEl.innerHTML = `<p>${content}</p>`;
+	messageEl.innerHTML = `<p></p>`;
+	messageEl.querySelector("p").textContent = content;
 	chatMessages.appendChild(messageEl);
-
-	// Scroll to bottom
 	chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
