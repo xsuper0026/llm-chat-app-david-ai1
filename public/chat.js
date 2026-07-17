@@ -38,15 +38,12 @@ userInput.addEventListener("keydown", function (e) {
 // Send button click handler
 sendButton.addEventListener("click", sendMessage);
 
-// 清除對話按鈕（若 HTML 有 clear-button 元素才綁定）
+// Clear chat button (optional)
 const clearButton = document.getElementById("clear-button");
 if (clearButton) {
 	clearButton.addEventListener("click", clearChat);
 }
 
-/**
- * 清除對話（重置 chat history 與 UI）
- */
 function clearChat() {
 	chatHistory = [{ ...INITIAL_MESSAGE }];
 	chatMessages.innerHTML = "";
@@ -54,9 +51,6 @@ function clearChat() {
 	userInput.focus();
 }
 
-/**
- * 將任何 error 物件序列化成人類可讀字串
- */
 function serializeError(error) {
 	if (error instanceof Error) {
 		return error.message || error.name || "Error";
@@ -74,34 +68,25 @@ function serializeError(error) {
 	return String(error);
 }
 
-/**
- * Sends a message to the chat API and processes the response
- */
 async function sendMessage() {
 	const message = userInput.value.trim();
 
 	if (message === "" || isProcessing) return;
 
-	// Disable input while processing
 	isProcessing = true;
 	userInput.disabled = true;
 	sendButton.disabled = true;
 
-	// Add user message to chat UI
 	addMessageToChat("user", message);
 
-	// Clear input
 	userInput.value = "";
 	userInput.style.height = "auto";
 
-	// Show typing indicator
 	typingIndicator.classList.add("visible");
 
-	// 記住原始 history 長度，方便失敗時 rollback
 	const historyLengthBeforeSend = chatHistory.length;
 	chatHistory.push({ role: "user", content: message });
 
-	// Create new assistant response element
 	const assistantMessageEl = document.createElement("div");
 	assistantMessageEl.className = "message assistant-message";
 	assistantMessageEl.innerHTML = "<p></p>";
@@ -122,7 +107,6 @@ async function sendMessage() {
 		});
 
 		if (!response.ok) {
-			// 讀取後端錯誤內容，區分是 AI 拒絕還是伺服器錯誤
 			let errorDetail = `HTTP ${response.status} ${response.statusText}`;
 			try {
 				const errorData = await response.json();
@@ -136,7 +120,7 @@ async function sendMessage() {
 						: JSON.stringify(errorData.detail || "");
 				errorDetail = `${err || "Error"}${detail ? " - " + detail : ""} (HTTP ${response.status})`;
 			} catch {
-				// JSON 解析失敗，保留 HTTP status
+				// keep default
 			}
 			throw new Error(errorDetail);
 		}
@@ -144,7 +128,6 @@ async function sendMessage() {
 			throw new Error("Response body is null");
 		}
 
-		// Process streaming response
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder();
 		let responseText = "";
@@ -170,7 +153,7 @@ async function sendMessage() {
 							jsonData.response.length > 0
 						) {
 							content = jsonData.response;
-						} else if (jsonData.choices?.[0]?.delta?.content) {
+						} else if (jsonData.choices && jsonData.choices[0] && jsonData.choices[0].delta && jsonData.choices[0].delta.content) {
 							content = jsonData.choices[0].delta.content;
 						}
 						if (content) {
@@ -201,7 +184,7 @@ async function sendMessage() {
 						jsonData.response.length > 0
 					) {
 						content = jsonData.response;
-					} else if (jsonData.choices?.[0]?.delta?.content) {
+					} else if (jsonData.choices && jsonData.choices[0] && jsonData.choices[0].delta && jsonData.choices[0].delta.content) {
 						content = jsonData.choices[0].delta.content;
 					}
 					if (content) {
@@ -215,11 +198,56 @@ async function sendMessage() {
 			if (sawDone) break;
 		}
 
-		// 判斷 AI 是否真的有回應
 		if (responseText.length > 0) {
 			chatHistory.push({ role: "assistant", content: responseText });
 		} else {
-			// 沒回應也算失敗（AI 拒絕但沒回錯誤），rollback 使用者訊息
 			chatHistory.length = historyLengthBeforeSend;
-			assistantTextEl.textContent =
-				"⚠️ AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他
+			assistantTextEl.textContent = "AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。";
+			assistantMessageEl.style.color = "#c0392b";
+		}
+	} catch (error) {
+		console.error("Error:", error);
+
+		chatHistory.length = historyLengthBeforeSend;
+
+		const errorMessage = serializeError(error);
+		assistantTextEl.textContent = "抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。（錯誤詳情：" + errorMessage + "）";
+		assistantMessageEl.style.color = "#c0392b";
+	} finally {
+		typingIndicator.classList.remove("visible");
+		isProcessing = false;
+		userInput.disabled = false;
+		sendButton.disabled = false;
+		userInput.focus();
+	}
+}
+
+function addMessageToChat(role, content) {
+	const messageEl = document.createElement("div");
+	messageEl.className = "message " + role + "-message";
+	messageEl.innerHTML = "<p></p>";
+	messageEl.querySelector("p").textContent = content;
+	chatMessages.appendChild(messageEl);
+	chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function consumeSseEvents(buffer) {
+	let normalized = buffer.replace(/\r/g, "");
+	const events = [];
+	let eventEndIndex;
+	while ((eventEndIndex = normalized.indexOf("\n\n")) !== -1) {
+		const rawEvent = normalized.slice(0, eventEndIndex);
+		normalized = normalized.slice(eventEndIndex + 2);
+
+		const lines = rawEvent.split("\n");
+		const dataLines = [];
+		for (const line of lines) {
+			if (line.startsWith("data:")) {
+				dataLines.push(line.slice("data:".length).trimStart());
+			}
+		}
+		if (dataLines.length === 0) continue;
+		events.push(dataLines.join("\n"));
+	}
+	return { events, buffer: normalized };
+}
