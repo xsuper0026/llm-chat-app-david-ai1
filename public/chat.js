@@ -38,20 +38,40 @@ userInput.addEventListener("keydown", function (e) {
 // Send button click handler
 sendButton.addEventListener("click", sendMessage);
 
-// ⭐ 新增：清除對話按鈕（如果 HTML 有 clear-button 元素）
+// 清除對話按鈕（若 HTML 有 clear-button 元素才綁定）
 const clearButton = document.getElementById("clear-button");
 if (clearButton) {
 	clearButton.addEventListener("click", clearChat);
 }
 
 /**
- * ⭐ 新增：清除對話（重置 chat history 與 UI）
+ * 清除對話（重置 chat history 與 UI）
  */
 function clearChat() {
 	chatHistory = [{ ...INITIAL_MESSAGE }];
 	chatMessages.innerHTML = "";
 	addMessageToChat("assistant", INITIAL_MESSAGE.content);
 	userInput.focus();
+}
+
+/**
+ * 將任何 error 物件序列化成人類可讀字串
+ */
+function serializeError(error) {
+	if (error instanceof Error) {
+		return error.message || error.name || "Error";
+	}
+	if (typeof error === "string") {
+		return error;
+	}
+	if (typeof error === "object" && error !== null) {
+		try {
+			return JSON.stringify(error);
+		} catch {
+			return String(error);
+		}
+	}
+	return String(error);
 }
 
 /**
@@ -77,7 +97,7 @@ async function sendMessage() {
 	// Show typing indicator
 	typingIndicator.classList.add("visible");
 
-	// ⭐ 記住原始 history 長度，方便失敗時 rollback
+	// 記住原始 history 長度，方便失敗時 rollback
 	const historyLengthBeforeSend = chatHistory.length;
 	chatHistory.push({ role: "user", content: message });
 
@@ -102,22 +122,26 @@ async function sendMessage() {
 		});
 
 		if (!response.ok) {
-			// ⭐ 讀取後端錯誤內容
+			// 讀取後端錯誤內容，區分是 AI 拒絕還是伺服器錯誤
 			let errorDetail = `HTTP ${response.status} ${response.statusText}`;
 			try {
 				const errorData = await response.json();
-				// 確保 detail 一定是 string
-				const detail = typeof errorData.detail === "string" 
-					? errorData.detail 
-					: JSON.stringify(errorData.detail);
-				const err = typeof errorData.error === "string"
-					? errorData.error
-					: JSON.stringify(errorData.error);
-				errorDetail = `${err || "Error"} - ${detail || ""} (HTTP ${response.status})`;
+				const err =
+					typeof errorData.error === "string"
+						? errorData.error
+						: JSON.stringify(errorData.error || "");
+				const detail =
+					typeof errorData.detail === "string"
+						? errorData.detail
+						: JSON.stringify(errorData.detail || "");
+				errorDetail = `${err || "Error"}${detail ? " - " + detail : ""} (HTTP ${response.status})`;
 			} catch {
-				// JSON 解析失敗，用 HTTP status
+				// JSON 解析失敗，保留 HTTP status
 			}
 			throw new Error(errorDetail);
+		}
+		if (!response.body) {
+			throw new Error("Response body is null");
 		}
 
 		// Process streaming response
@@ -191,77 +215,11 @@ async function sendMessage() {
 			if (sawDone) break;
 		}
 
-		// ⭐ 判斷 AI 是否真的有回應
+		// 判斷 AI 是否真的有回應
 		if (responseText.length > 0) {
 			chatHistory.push({ role: "assistant", content: responseText });
 		} else {
-			// ⭐ 沒回應也算失敗（AI 拒絕但沒回錯誤），rollback 使用者訊息
+			// 沒回應也算失敗（AI 拒絕但沒回錯誤），rollback 使用者訊息
 			chatHistory.length = historyLengthBeforeSend;
 			assistantTextEl.textContent =
-				"⚠️ AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。";
-			assistantMessageEl.style.color = "#c0392b";
-		}
-	} catch (error) {
-		console.error("Error:", error);
-
-		// ⭐ 修正：正確序列化 error 物件
-		let errorMessage = "未知錯誤";
-		if (error instanceof Error) {
-			errorMessage = error.message;
-		} else if (typeof error === "object" && error !== null) {
-			try {
-				errorMessage = JSON.stringify(error);
-			} catch {
-				errorMessage = String(error);
-			}
-		} else {
-			errorMessage = String(error);
-		}
-
-		// ⭐ 關鍵修正：失敗時 rollback chatHistory
-		chatHistory.length = historyLengthBeforeSend;
-
-		// ⭐ 顯示清楚的錯誤訊息
-		assistantTextEl.textContent = `⚠️ 抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。\n\n（錯誤詳情：${errorMessage}）`;
-		assistantMessageEl.style.color = "#c0392b";
-	} finally {
-		typingIndicator.classList.remove("visible");
-		isProcessing = false;
-		userInput.disabled = false;
-		sendButton.disabled = false;
-		userInput.focus();
-	}
-}
-
-/**
- * Helper function to add message to chat UI
- */
-function addMessageToChat(role, content) {
-	const messageEl = document.createElement("div");
-	messageEl.className = `message ${role}-message`;
-	messageEl.innerHTML = `<p></p>`;
-	messageEl.querySelector("p").textContent = content;
-	chatMessages.appendChild(messageEl);
-	chatMessages.scrollTop = chatMessages.scrollHeight;
-}
-
-function consumeSseEvents(buffer) {
-	let normalized = buffer.replace(/\r/g, "");
-	const events = [];
-	let eventEndIndex;
-	while ((eventEndIndex = normalized.indexOf("\n\n")) !== -1) {
-		const rawEvent = normalized.slice(0, eventEndIndex);
-		normalized = normalized.slice(eventEndIndex + 2);
-
-		const lines = rawEvent.split("\n");
-		const dataLines = [];
-		for (const line of lines) {
-			if (line.startsWith("data:")) {
-				dataLines.push(line.slice("data:".length).trimStart());
-			}
-		}
-		if (dataLines.length === 0) continue;
-		events.push(dataLines.join("\n"));
-	}
-	return { events, buffer: normalized };
-}
+				"⚠️ AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他
