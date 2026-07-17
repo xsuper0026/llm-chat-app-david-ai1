@@ -102,18 +102,22 @@ async function sendMessage() {
 		});
 
 		if (!response.ok) {
-			// ⭐ 讀取後端錯誤內容，區分是 AI 拒絕還是伺服器錯誤
-			let errorDetail = "";
+			// ⭐ 讀取後端錯誤內容
+			let errorDetail = `HTTP ${response.status} ${response.statusText}`;
 			try {
 				const errorData = await response.json();
-				errorDetail = errorData.detail || errorData.error || "";
+				// 確保 detail 一定是 string
+				const detail = typeof errorData.detail === "string" 
+					? errorData.detail 
+					: JSON.stringify(errorData.detail);
+				const err = typeof errorData.error === "string"
+					? errorData.error
+					: JSON.stringify(errorData.error);
+				errorDetail = `${err || "Error"} - ${detail || ""} (HTTP ${response.status})`;
 			} catch {
-				errorDetail = `HTTP ${response.status}`;
+				// JSON 解析失敗，用 HTTP status
 			}
 			throw new Error(errorDetail);
-		}
-		if (!response.body) {
-			throw new Error("Response body is null");
 		}
 
 		// Process streaming response
@@ -200,11 +204,25 @@ async function sendMessage() {
 	} catch (error) {
 		console.error("Error:", error);
 
-		// ⭐ 關鍵修正：失敗時 rollback chatHistory，避免汙染後續對話
+		// ⭐ 修正：正確序列化 error 物件
+		let errorMessage = "未知錯誤";
+		if (error instanceof Error) {
+			errorMessage = error.message;
+		} else if (typeof error === "object" && error !== null) {
+			try {
+				errorMessage = JSON.stringify(error);
+			} catch {
+				errorMessage = String(error);
+			}
+		} else {
+			errorMessage = String(error);
+		}
+
+		// ⭐ 關鍵修正：失敗時 rollback chatHistory
 		chatHistory.length = historyLengthBeforeSend;
 
-		// ⭐ 顯示更清楚的錯誤訊息
-		assistantTextEl.textContent = `⚠️ 抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。\n\n（錯誤詳情：${error.message || error}）`;
+		// ⭐ 顯示清楚的錯誤訊息
+		assistantTextEl.textContent = `⚠️ 抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。\n\n（錯誤詳情：${errorMessage}）`;
 		assistantMessageEl.style.color = "#c0392b";
 	} finally {
 		typingIndicator.classList.remove("visible");
