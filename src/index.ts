@@ -22,11 +22,6 @@ const SYSTEM_PROMPT =
   "You are a helpful, friendly assistant. Provide concise and accurate responses.";
 const GATEWAY_ID = "david-gateway";
 
-// 被 Guardrails 擋下時，最多重試幾次（用來吸收偶發性的評估誤擋）
-const MAX_RETRIES = 3;
-// 每次重試之間等待的毫秒數
-const RETRY_DELAY_MS = 400;
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -52,10 +47,6 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function handleChatRequest(request: Request, env: Env): Promise<Response> {
   try {
     if (!env.AI) {
@@ -68,66 +59,59 @@ async function handleChatRequest(request: Request, env: Env): Promise<Response> 
     }
 
     const body = (await request.json()) as { messages?: ChatMessage[] };
-    const messages: ChatMessage[] = body.messages ?? [];
+    const incoming: ChatMessage[] = body.messages ?? [];
 
-    if (!messages.some((msg) => msg.role === "system")) {
-      messages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    // ⭐ 路 B：只取「最後一則 user 訊息」，不帶任何歷史上下文。
+    // 原因：Guardrails（Block 模式）會評估整包 prompt，帶越多上下文越容易誤判。
+    // 只送單則短 prompt，可大幅降低正常問題被誤擋的機率；
+    // 真正的違規內容（如炸彈）仍為單則，Guardrails 一樣會擋下。
+    const lastUser = [...incoming].reverse().find((m) => m.role === "user");
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: SYSTEM_PROMPT },
+    ];
+    if (lastUser) {
+      messages.push({ role: "user", content: lastUser.content });
     }
 
-    let lastStatus = 0;
-    let lastDetail = "";
-
-    // 送出請求，若被 Guardrails 擋下（non-2xx）就重試。
-    // 偶發性誤擋通常重試就會通過；真正的違規內容則會穩定被擋。
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const response = await env.AI.run(
-        MODEL_ID,
-        {
-          messages,
-          max_tokens: 1024,
-          stream: true,
+    const response = await env.AI.run(
+      MODEL_ID,
+      {
+        messages,
+        max_tokens: 1024,
+        stream: true,
+      },
+      {
+        returnRawResponse: true,
+        gateway: {
+          id: GATEWAY_ID,
+          skipCache: true,
+          cacheTtl: 3600,
         },
-        {
-          returnRawResponse: true,
-          gateway: {
-            id: GATEWAY_ID,
-            skipCache: true, // 每次都重新評估，不吃快取
-            cacheTtl: 3600,
-          },
-        }
-      );
-
-      // 成功：直接把 SSE streaming 回傳給前端
-      if (response.ok) {
-        return response;
       }
+    );
 
-      // 被擋：記錄狀態，準備重試
-      lastStatus = response.status;
+    // Guardrails 擋下時回 non-2xx（例如 424）。轉成前端可判斷的可繼續訊號。
+    if (!response.ok) {
+      let detail = "";
       try {
-        lastDetail = await response.clone().text();
+        detail = await response.clone().text();
       } catch {
-        lastDetail = "";
+        detail = "";
       }
-
-      // 還有重試次數就等一下再試
-      if (attempt < MAX_RETRIES) {
-        await sleep(RETRY_DELAY_MS);
-        continue;
-      }
+      return new Response(
+        JSON.stringify({
+          error: "guardrail_blocked",
+          message:
+            "AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。",
+          status: response.status,
+          detail,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
     }
 
-    // 重試多次仍被擋 → 判定為真正的違規內容，回傳可繼續的 guardrail_blocked 訊號
-    return new Response(
-      JSON.stringify({
-        error: "guardrail_blocked",
-        message:
-          "AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。",
-        status: lastStatus,
-        detail: lastDetail,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return response;
   } catch (error) {
     console.error("Error processing chat request:", error);
     return new Response(
