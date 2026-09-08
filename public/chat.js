@@ -4,30 +4,25 @@
  * Handles the chat UI interactions and communication with the backend API.
  */
 
-// DOM elements
 const chatMessages = document.getElementById("chat-messages");
 const userInput = document.getElementById("user-input");
 const sendButton = document.getElementById("send-button");
 const typingIndicator = document.getElementById("typing-indicator");
 
-// Initial welcome message
 const INITIAL_MESSAGE = {
 	role: "assistant",
 	content:
 		"Hello! I'm an LLM chat app powered by Cloudflare Workers AI. How can I help you today?",
 };
 
-// Chat state
 let chatHistory = [{ ...INITIAL_MESSAGE }];
 let isProcessing = false;
 
-// Auto-resize textarea
 userInput.addEventListener("input", function () {
 	this.style.height = "auto";
 	this.style.height = this.scrollHeight + "px";
 });
 
-// Send message on Enter (without Shift)
 userInput.addEventListener("keydown", function (e) {
 	if (e.key === "Enter" && !e.shiftKey) {
 		e.preventDefault();
@@ -35,10 +30,8 @@ userInput.addEventListener("keydown", function (e) {
 	}
 });
 
-// Send button click handler
 sendButton.addEventListener("click", sendMessage);
 
-// Clear chat button (optional)
 const clearButton = document.getElementById("clear-button");
 if (clearButton) {
 	clearButton.addEventListener("click", clearChat);
@@ -68,9 +61,16 @@ function serializeError(error) {
 	return String(error);
 }
 
+// 統一「顯示被擋 / 失敗，並把該則移出歷史」的處理
+function markBlocked(assistantMessageEl, assistantTextEl, historyLengthBeforeSend, text) {
+	// 關鍵：把被擋的 user 訊息從歷史移除，避免下一次連坐
+	chatHistory.length = historyLengthBeforeSend;
+	assistantTextEl.textContent = text;
+	assistantMessageEl.style.color = "#c0392b";
+}
+
 async function sendMessage() {
 	const message = userInput.value.trim();
-
 	if (message === "" || isProcessing) return;
 
 	isProcessing = true;
@@ -98,31 +98,46 @@ async function sendMessage() {
 	try {
 		const response = await fetch("/api/chat", {
 			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({
-				messages: chatHistory,
-			}),
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ messages: chatHistory }),
 		});
 
-		if (!response.ok) {
-			let errorDetail = `HTTP ${response.status} ${response.statusText}`;
+		// 先嘗試判斷是否為 JSON（被擋 / 錯誤時 Worker 回 JSON，正常時回 SSE stream）
+		const contentType = response.headers.get("content-type") || "";
+		if (contentType.includes("application/json")) {
+			let data = {};
 			try {
-				const errorData = await response.json();
-				const err =
-					typeof errorData.error === "string"
-						? errorData.error
-						: JSON.stringify(errorData.error || "");
-				const detail =
-					typeof errorData.detail === "string"
-						? errorData.detail
-						: JSON.stringify(errorData.detail || "");
-				errorDetail = `${err || "Error"}${detail ? " - " + detail : ""} (HTTP ${response.status})`;
+				data = await response.json();
 			} catch {
-				// keep default
+				data = {};
 			}
-			throw new Error(errorDetail);
+
+			// 被 Guardrails 擋下，或後端回報的可繼續錯誤
+			if (data.error === "guardrail_blocked") {
+				markBlocked(
+					assistantMessageEl,
+					assistantTextEl,
+					historyLengthBeforeSend,
+					data.message ||
+						"AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。"
+				);
+				return;
+			}
+
+			// 其他 JSON 錯誤
+			markBlocked(
+				assistantMessageEl,
+				assistantTextEl,
+				historyLengthBeforeSend,
+				"抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。（" +
+					serializeError(data.detail || data.error || "未知錯誤") +
+					"）"
+			);
+			return;
+		}
+
+		if (!response.ok) {
+			throw new Error(`HTTP ${response.status} ${response.statusText}`);
 		}
 		if (!response.body) {
 			throw new Error("Response body is null");
@@ -148,12 +163,14 @@ async function sendMessage() {
 					try {
 						const jsonData = JSON.parse(data);
 						let content = "";
-						if (
-							typeof jsonData.response === "string" &&
-							jsonData.response.length > 0
-						) {
+						if (typeof jsonData.response === "string" && jsonData.response.length > 0) {
 							content = jsonData.response;
-						} else if (jsonData.choices && jsonData.choices[0] && jsonData.choices[0].delta && jsonData.choices[0].delta.content) {
+						} else if (
+							jsonData.choices &&
+							jsonData.choices[0] &&
+							jsonData.choices[0].delta &&
+							jsonData.choices[0].delta.content
+						) {
 							content = jsonData.choices[0].delta.content;
 						}
 						if (content) {
@@ -179,12 +196,14 @@ async function sendMessage() {
 				try {
 					const jsonData = JSON.parse(data);
 					let content = "";
-					if (
-						typeof jsonData.response === "string" &&
-						jsonData.response.length > 0
-					) {
+					if (typeof jsonData.response === "string" && jsonData.response.length > 0) {
 						content = jsonData.response;
-					} else if (jsonData.choices && jsonData.choices[0] && jsonData.choices[0].delta && jsonData.choices[0].delta.content) {
+					} else if (
+						jsonData.choices &&
+						jsonData.choices[0] &&
+						jsonData.choices[0].delta &&
+						jsonData.choices[0].delta.content
+					) {
 						content = jsonData.choices[0].delta.content;
 					}
 					if (content) {
@@ -201,18 +220,24 @@ async function sendMessage() {
 		if (responseText.length > 0) {
 			chatHistory.push({ role: "assistant", content: responseText });
 		} else {
-			chatHistory.length = historyLengthBeforeSend;
-			assistantTextEl.textContent = "AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。";
-			assistantMessageEl.style.color = "#c0392b";
+			// 串流成功但沒有內容 → 也視為被擋，移出歷史
+			markBlocked(
+				assistantMessageEl,
+				assistantTextEl,
+				historyLengthBeforeSend,
+				"AI 無法回覆這個訊息（可能違反內容政策）。這則訊息已從對話中移除，你可以繼續發問其他問題。"
+			);
 		}
 	} catch (error) {
 		console.error("Error:", error);
-
-		chatHistory.length = historyLengthBeforeSend;
-
-		const errorMessage = serializeError(error);
-		assistantTextEl.textContent = "抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。（錯誤詳情：" + errorMessage + "）";
-		assistantMessageEl.style.color = "#c0392b";
+		markBlocked(
+			assistantMessageEl,
+			assistantTextEl,
+			historyLengthBeforeSend,
+			"抱歉，這則訊息處理失敗。這則訊息已從對話中移除，你可以繼續發問。（錯誤詳情：" +
+				serializeError(error) +
+				"）"
+		);
 	} finally {
 		typingIndicator.classList.remove("visible");
 		isProcessing = false;
