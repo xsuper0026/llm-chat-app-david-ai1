@@ -76,21 +76,19 @@ async function handleChatRequest(request: Request, env: Env): Promise<Response> 
       {
         messages,
         max_tokens: 1024,
-        stream: true, // ⭐ 啟用 SSE streaming
+        stream: true, // 啟用 SSE streaming
       },
       {
         returnRawResponse: true,
         gateway: {
-          id: david-gateway,
-          skipCache: true, // ⭐ 跳過快取（否則可能回傳舊的 JSON 格式）
+          id: GATEWAY_ID,
+          skipCache: true,
           cacheTtl: 3600,
         },
       }
     );
 
-    // ⭐ 攔截 Guardrails 擋下的請求
-    // Guardrails 觸發 block 時，AI Gateway 會回非 2xx 狀態碼。
-    // 這裡把它轉成前端可判斷的訊號，避免整個聊天中斷。
+    // 攔截 Guardrails 擋下的請求
     if (!response.ok) {
       let detail = "";
       try {
@@ -99,7 +97,6 @@ async function handleChatRequest(request: Request, env: Env): Promise<Response> 
         detail = "";
       }
 
-      // 判斷是否為 Guardrails / 內容安全類的攔截
       const isBlocked =
         response.status === 400 ||
         response.status === 403 ||
@@ -114,14 +111,12 @@ async function handleChatRequest(request: Request, env: Env): Promise<Response> 
             detail,
           }),
           {
-            // 回 200，讓前端好判斷、且不會被當成伺服器錯誤
             status: 200,
             headers: { "content-type": "application/json" },
           }
         );
       }
 
-      // 其他非 2xx（例如模型錯誤、逾時）
       return new Response(
         JSON.stringify({
           error: "upstream_error",
